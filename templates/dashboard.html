@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dashboard</title>
+    <style>
+        body { font-family: Arial; background: #eef2f7; }
+        .container { width: 500px; margin: 80px auto; background: white; padding: 30px; border-radius: 8px; }
+        .item { margin: 12px 0; }
+        a { text-decoration: none; color: #007bff; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Welcome, {{ user.username }}</h2>
+
+        <div class="item"><strong>Username:</strong> {{ user.username }}</div>
+        <div class="item"><strong>Location ID:</strong> {{ user.location_id }}</div>
+        <div class="item"><strong>Account Expiry:</strong> {{ user.account_expirydate or "Not set" }}</div>
+        <div class="item"><strong>Active:</strong> {{ "Yes" if user.active_flag else "No" }}</div>
+        <div class="item"><strong>Login Time:</strong> {{ user.logintime or "Not logged in yet" }}</div>
+        <div class="item"><strong>2FA Enabled:</strong> {{ "Yes" if user.two_factor_enabled else "No" }}</div>
+
+        <p><a href="{{ url_for('logout') }}">Logout</a></p>
+    </div>
+</body>
+</html>

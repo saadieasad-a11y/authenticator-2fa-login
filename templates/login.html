@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+    <style>
+        body { font-family: Arial; background: #f4f4f4; }
+        .container { width: 400px; margin: 100px auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        input { width: 100%; padding: 10px; margin-top: 10px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 5px; margin-top: 15px; }
+        .alert { padding: 10px; margin-bottom: 15px; border-radius: 5px; }
+        .alert-success { background: #d4edda; color: #155724; }
+        .alert-danger { background: #f8d7da; color: #721c24; }
+        .alert-info { background: #d1ecf1; color: #0c5460; }
+        a { display: inline-block; margin-top: 15px; text-decoration: none; color: #007bff; }
+        img { width: 200px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Login</h2>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form method="POST" action="{{ url_for('login') }}">
+            <input type="text" name="username" placeholder="Username" value="{{ username or '' }}" required>
+            <input type="password" name="password" placeholder="Password" required>
+
+            {% if require_totp %}
+                <input type="text" name="totp_code" placeholder="Authenticator Code" required>
+            {% endif %}
+
+            <button type="submit">Login</button>
+        </form>
+
+        {% if qr_path %}
+            <img src="{{ qr_path }}" alt="Authenticator QR">
+        {% endif %}
+
+        <p><a href="{{ url_for('register') }}">Create account</a></p>
+        <p><a href="{{ url_for('reset_password') }}">Reset password</a></p>
+    </div>
+</body>
+</html>
