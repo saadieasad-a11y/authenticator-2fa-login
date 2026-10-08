@@ -1,69 +1,71 @@
 from flask import Flask, render_template, request, redirect, url_for, session, flash
-import sqlite3
 import pyotp
 import qrcode
 import os
 import secrets
 from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "auth.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/auth_app")
 QR_DIR = os.path.join(BASE_DIR, "static", "qr_codes")
-
 os.makedirs(QR_DIR, exist_ok=True)
 
 
 def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
 def init_db():
-    schema_path = os.path.join(BASE_DIR, "database", "schema.sql")
-    if not os.path.exists(schema_path):
-        os.makedirs(os.path.dirname(schema_path), exist_ok=True)
-        with open(schema_path, "w", encoding="utf-8") as f:
-            f.write('''CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    account_expirydate TEXT,
-    location_id TEXT NOT NULL,
-    active_flag INTEGER NOT NULL DEFAULT 1,
-    logintime TEXT,
-    totp_secret TEXT,
-    is_2fa_enabled INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-''')
-
-    with open(schema_path, "r", encoding="utf-8") as f:
-        schema_sql = f.read()
-
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.executescript(schema_sql)
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(255) UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                account_expirydate DATE,
+                location_id VARCHAR(255) NOT NULL,
+                active_flag BOOLEAN NOT NULL DEFAULT TRUE,
+                logintime TIMESTAMP,
+                totp_secret TEXT,
+                is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        conn.commit()
+    conn.close()
 
 
 def get_user_by_username(username):
     conn = get_db_connection()
-    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+    user = cur.fetchone()
+    cur.close()
     conn.close()
     return user
 
 
 def update_login_time(username):
     conn = get_db_connection()
-    conn.execute(
-        "UPDATE users SET logintime = ? WHERE username = ?",
-        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username),
-    )
-    conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE users SET logintime = %s WHERE username = %s",
+            (datetime.now(), username),
+        )
+        conn.commit()
     conn.close()
 
 
@@ -77,10 +79,19 @@ def generate_qr_code(username, secret):
     return f"/static/qr_codes/{username}_qr.png"
 
 
+def normalize_account_expiry(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    return value
+
+
 @app.before_request
 def ensure_db():
-    if not os.path.exists(DB_PATH):
-        init_db()
+    init_db()
 
 
 @app.route("/")
@@ -94,9 +105,9 @@ def register():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         location_id = request.form.get("location_id", "").strip()
-        account_expirydate = request.form.get("account_expirydate", "")
-        active_flag = 1 if request.form.get("active_flag") == "on" else 0
-        enable_2fa = 1 if request.form.get("enable_2fa") == "on" else 0
+        account_expirydate = request.form.get("account_expirydate", "") or None
+        active_flag = True if request.form.get("active_flag") == "on" else False
+        enable_2fa = True if request.form.get("enable_2fa") == "on" else False
 
         if not username or not password or not location_id:
             flash("Username, password and location_id are required.", "danger")
@@ -110,15 +121,16 @@ def register():
         hashed_password = generate_password_hash(password)
 
         conn = get_db_connection()
-        conn.execute(
-            """
-            INSERT INTO users
-            (username, password_hash, account_expirydate, location_id, active_flag, is_2fa_enabled, totp_secret)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (username, hashed_password, account_expirydate or None, location_id, active_flag, enable_2fa, secret),
-        )
-        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users
+                (username, password_hash, account_expirydate, location_id, active_flag, is_2fa_enabled, totp_secret)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (username, hashed_password, account_expirydate, location_id, active_flag, enable_2fa, secret),
+            )
+            conn.commit()
         conn.close()
 
         if enable_2fa:
@@ -152,20 +164,16 @@ def login():
             flash("Invalid username or password.", "danger")
             return render_template("login.html", username=username)
 
-        if user["account_expirydate"]:
-            try:
-                expiry = datetime.strptime(user["account_expirydate"], "%Y-%m-%d")
-                if datetime.now().date() > expiry.date():
-                    flash("Your account has expired.", "danger")
-                    return render_template("login.html", username=username)
-            except ValueError:
-                pass
+        expiry_date = normalize_account_expiry(user.get("account_expirydate"))
+        if expiry_date is not None and datetime.now().date() > expiry_date:
+            flash("Your account has expired.", "danger")
+            return render_template("login.html", username=username)
 
-        if user["active_flag"] != 1:
+        if user.get("active_flag") is not True and user.get("active_flag") != 1:
             flash("Your account is inactive.", "danger")
             return render_template("login.html", username=username)
 
-        if user["is_2fa_enabled"] == 1:
+        if user.get("is_2fa_enabled") in (True, 1):
             if not totp_code:
                 require_totp = True
                 return render_template("login.html", username=username, require_totp=True)
@@ -196,7 +204,7 @@ def dashboard():
     user_data = {
         "username": user["username"],
         "location_id": user["location_id"],
-        "account_expirydate": user["account_expirydate"],
+        "account_expirydate": normalize_account_expiry(user.get("account_expirydate")),
         "active_flag": bool(user["active_flag"]),
         "logintime": user["logintime"],
         "two_factor_enabled": bool(user["is_2fa_enabled"]),
@@ -227,11 +235,12 @@ def reset_password():
             return redirect(url_for("reset_password"))
 
         conn = get_db_connection()
-        conn.execute(
-            "UPDATE users SET password_hash = ? WHERE username = ?",
-            (generate_password_hash(new_password), username),
-        )
-        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE username = %s",
+                (generate_password_hash(new_password), username),
+            )
+            conn.commit()
         conn.close()
 
         flash("Password reset successful. Please log in again.", "success")
@@ -243,4 +252,3 @@ def reset_password():
 if __name__ == "__main__":
     init_db()
     app.run(debug=True, host="0.0.0.0", port=5000)
-
